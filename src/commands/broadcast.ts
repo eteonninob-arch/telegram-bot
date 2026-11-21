@@ -294,8 +294,8 @@ export class BroadcastStore {
     message: string,
     chats: readonly string[],
     ttlMs?: number,
-    chatId: string = operatorId,
     destinationFingerprint?: string,
+    chatId: string = operatorId,
   ): PendingBroadcast {
     this.cleanup();
     while (this.items.size >= this.capacity) {
@@ -462,7 +462,18 @@ export class BroadcastStore {
     now: number = this.now(),
   ): ConfirmationCheck {
     const entry = this.persisted.find((e) => e.idHash === hashId(id));
-    if (!entry) return { ok: false, reason: "unknown" };
+    if (!entry) {
+      // Fall back to an in-memory pending item with no persisted identity
+      // (e.g. one registered directly in the store); bind it the same way.
+      const item = this.items.get(id);
+      if (!item) return { ok: false, reason: "unknown" };
+      if (item.expiresAt <= now) return { ok: false, reason: "expired" };
+      if (item.operatorId !== binding.operatorId) return { ok: false, reason: "actor_mismatch" };
+      if (item.chatId !== undefined && item.chatId !== binding.chatId) {
+        return { ok: false, reason: "chat_mismatch" };
+      }
+      return { ok: true };
+    }
     if (entry.consumedAt !== undefined) return { ok: false, reason: "replayed" };
     if (entry.expiresAt <= now) return { ok: false, reason: "expired" };
     if (entry.operatorId !== binding.operatorId) return { ok: false, reason: "actor_mismatch" };
@@ -852,8 +863,8 @@ export async function handleBroadcastCommand(
     text,
     chats,
     deps.broadcastExpiryMs,
-    chatId,
     fingerprint,
+    String(ctx.chat?.id),
   );
 
   const previewText = formatBroadcastPreview(text, chats, fingerprint);

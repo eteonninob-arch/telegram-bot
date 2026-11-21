@@ -1,13 +1,23 @@
 /*
- * Offline cursor backup, restore and recovery preview command. It never contacts Stellar or
- * Telegram; restore uses the normal instance lock to exclude a running poller.
+ * Offline cursor backup, restore, history, recovery-preview and consistency-check
+ * command. It never contacts Stellar or Telegram; restore uses the normal
+ * instance lock to exclude a running poller. `history`, `preview` and `check`
+ * are read-only.
  */
 
 import { randomUUID } from "node:crypto";
-import { access, link, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { access, link, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { config as loadDotenv } from "dotenv";
+import { pathToFileURL } from "node:url";
 
+import {
+  checkCursorConsistency,
+  formatCursorConsistencyReport,
+  type CursorConsistencyReport,
+} from "./cursor-consistency.js";
 import { acquireInstanceLock } from "./instanceLock.js";
+import { readArchive } from "./stellar/archive.js";
 import {
   appendCursorRecoveryHistory,
   parseAndMigrateCursorFile,
@@ -64,9 +74,47 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
-async function assertDifferentPaths(cursorFile: string, backupFile: string): Promise<void> {
-  if (path.resolve(cursorFile) === path.resolve(backupFile)) {
-    throw new Error("cursor file and backup file must be different paths");
+async function canonicalizePath(filePath: string): Promise<string> {
+  const resolved = path.resolve(filePath);
+  const normalizeCase = (value: string) =>
+    process.platform === "win32" ? value.toLowerCase() : value;
+
+  try {
+    return normalizeCase(await realpath(resolved));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw err;
+    }
+  }
+
+  // If the leaf does not exist yet, resolve symlinks on the nearest existing ancestor.
+  const segments: string[] = [];
+  let current = resolved;
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return normalizeCase(resolved);
+    }
+    segments.unshift(path.basename(current));
+    current = parent;
+    try {
+      const realParent = await realpath(current);
+      return normalizeCase(path.join(realParent, ...segments));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw err;
+      }
+    }
+  }
+}
+
+export async function assertDifferentPaths(left: string, right: string): Promise<void> {
+  const [canonicalLeft, canonicalRight] = await Promise.all([
+    canonicalizePath(left),
+    canonicalizePath(right),
+  ]);
+  if (canonicalLeft === canonicalRight) {
+    throw new Error("backup and live cursor paths must be different");
   }
 }
 
@@ -285,6 +333,71 @@ export async function readCursorRecoveryHistory(cursorFile: string): Promise<Cur
   return parsed.file.recoveryHistory ?? [];
 }
 
+/**
+ * Load scan-archive records without modifying them. A directory is read as an
+ * event archive (`events-*.jsonl`, see `createEventArchive`); a file is read as
+ * a `npm run scan -- --jsonl` export, skipping its `{ "type": "summary" }` line.
+ */
+export async function readScanArchiveRecords(archivePath: string): Promise<unknown[]> {
+  let info;
+  try {
+    info = await stat(archivePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`archive not found at ${archivePath}`);
+    }
+    throw err;
+  }
+
+  const records: unknown[] = [];
+  if (info.isDirectory()) {
+    for await (const event of readArchive(archivePath)) records.push(event);
+    return records;
+  }
+
+  const raw = await readFile(archivePath, "utf8");
+  const lines = raw.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index]!.trim();
+    if (!trimmed) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error(`malformed archive record at line ${index + 1}`);
+    }
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const { type, ...rest } = parsed as Record<string, unknown>;
+      if (type === "summary") continue;
+      records.push(type === undefined || type === "event" ? rest : parsed);
+      continue;
+    }
+    records.push(parsed);
+  }
+  return records;
+}
+
+export interface CheckCursorOptions {
+  cursorFile: string;
+  archivePath: string;
+  /** Contract id each source is expected to belong to (e.g. `{ market: MARKET_CONTRACT_ID }`). */
+  expectedContracts?: Record<string, string | undefined>;
+}
+
+/**
+ * Read-only consistency check of a cursor file against a scan archive. Takes
+ * no instance lock and writes nothing: neither the cursor nor the archive is
+ * modified, whatever the result.
+ */
+export async function checkCursor(options: CheckCursorOptions): Promise<CursorConsistencyReport> {
+  const raw = await readFile(options.cursorFile, "utf8");
+  const parsed = validateCursor(raw);
+  const records = await readScanArchiveRecords(options.archivePath);
+  return checkCursorConsistency(parsed.file, records, {
+    expectedContracts: options.expectedContracts,
+  });
+}
+
 interface CliOptions {
   file?: string;
   out?: string;
@@ -293,20 +406,27 @@ interface CliOptions {
   to?: string;
   retainedStart?: string;
   retainedEnd?: string;
+  archive?: string;
+  marketContract?: string;
+  squadContract?: string;
   force: boolean;
+  json: boolean;
 }
 
 function parseOptions(args: string[]): CliOptions {
-  const options: CliOptions = { force: false };
+  const options: CliOptions = { force: false, json: false };
   const seen = new Set<string>();
-  const valued = new Set(["--file", "--out", "--from", "--target", "--to", "--retained-start", "--retained-end"]);
+  const valued = new Set([
+    "--file", "--out", "--from", "--target", "--to", "--retained-start", "--retained-end",
+    "--archive", "--market-contract", "--squad-contract",
+  ]);
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index] ?? "";
-    if (arg === "--force") {
-      if (seen.has(arg)) throw new Error("duplicate --force option");
+    if (arg === "--force" || arg === "--json") {
+      if (seen.has(arg)) throw new Error(`duplicate ${arg} option`);
       seen.add(arg);
-      options.force = true;
+      options[arg.slice(2) as "force" | "json"] = true;
       continue;
     }
     if (!valued.has(arg)) {
@@ -315,7 +435,9 @@ function parseOptions(args: string[]): CliOptions {
     if (seen.has(arg)) throw new Error(`duplicate ${arg} option`);
     seen.add(arg);
     const value = args[index + 1];
-    if (value === undefined || value.startsWith("--")) throw new Error(`${arg} requires a value`);
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error(`${arg} requires ${arg.endsWith("-contract") ? "a contract id" : "a value"}`);
+    }
     const key = arg.slice(2).replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
     (options as unknown as Record<string, string>)[key] = value;
     index += 1;
@@ -329,4 +451,91 @@ function parseLedger(value: string, label: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed)) throw new Error(`${label} is out of range`);
   return parsed;
+}
+
+function resolvePath(value: string): string {
+  return path.resolve(process.cwd(), value);
+}
+
+async function main(): Promise<void> {
+  loadDotenv({ path: process.env.DOTENV_CONFIG_PATH || ".env" });
+  const [action, ...args] = process.argv.slice(2);
+  if (action !== "backup" && action !== "restore" && action !== "history" && action !== "preview" && action !== "check") {
+    throw new Error(
+      "usage: npm run cursor -- <backup|restore|history|preview|check> [--file PATH] [--out PATH|--from PATH] " +
+        "[--to LEDGER] [--target NAME] [--retained-start LEDGER --retained-end LEDGER] [--force] " +
+        "[--archive PATH [--json] [--market-contract ID] [--squad-contract ID]]",
+    );
+  }
+
+  const options = parseOptions(args);
+  const cursorFile = resolvePath(options.file ?? process.env.CURSOR_FILE ?? "./data/cursor.json");
+  if (action === "check") {
+    if (!options.archive) throw new Error("check requires --archive PATH");
+    const report = await checkCursor({
+      cursorFile,
+      archivePath: resolvePath(options.archive),
+      expectedContracts: {
+        market: options.marketContract ?? (process.env.MARKET_CONTRACT_ID || undefined),
+        squad: options.squadContract ?? (process.env.SQUAD_CONTRACT_ID || undefined),
+      },
+    });
+    process.stdout.write(
+      options.json ? `${JSON.stringify(report, null, 2)}\n` : formatCursorConsistencyReport(report),
+    );
+    // Non-zero on any error finding so scripts can gate on it; nothing was written.
+    if (!report.consistent) process.exitCode = 1;
+    return;
+  }
+  if (action === "history") {
+    const history = await readCursorRecoveryHistory(cursorFile);
+    console.log(`[cursor] recovery history (${history.length}) for ${cursorFile}`);
+    for (const record of history) {
+      const targetPart = record.source ? ` source=${record.source}` : "";
+      console.log(
+        `  ${record.at} reason=${record.reason}${targetPart} ` +
+          `before=[${summarizePositions(record.before)}] after=[${summarizePositions(record.after)}]`,
+      );
+    }
+    return;
+  }
+
+  if (action === "preview") {
+    if (!options.to) throw new Error("preview requires --to LEDGER");
+    const preview = await previewRecovery({
+      cursorFile,
+      proposedLedger: parseLedger(options.to, "--to"),
+      ...(options.target !== undefined ? { target: options.target } : {}),
+      ...(options.retainedStart !== undefined
+        ? { retainedWindowStart: parseLedger(options.retainedStart, "--retained-start") }
+        : {}),
+      ...(options.retainedEnd !== undefined
+        ? { retainedWindowEnd: parseLedger(options.retainedEnd, "--retained-end") }
+        : {}),
+    });
+    console.log(formatRecoveryPreview(preview));
+    return;
+  }
+
+  if (action === "backup") {
+    const backupFile = resolvePath(
+      options.out ?? `${cursorFile}.${new Date().toISOString().replace(/[:.]/g, "-")}.bak`,
+    );
+    await backupCursor({ cursorFile, backupFile, force: options.force });
+    return;
+  }
+
+  if (!options.from) throw new Error("restore requires --from PATH");
+  const backupFile = resolvePath(options.from);
+  const lockFile = resolvePath(process.env.INSTANCE_LOCK_FILE ?? "./data/poller.lock");
+  await restoreCursor({ cursorFile, backupFile, lockFile, force: options.force });
+}
+
+const invokedPath = process.argv[1];
+if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : "cursor command failed";
+    console.error(`[cursor] ${message.replace(/\s+/g, " ").slice(0, 300)}`);
+    process.exit(1);
+  });
 }

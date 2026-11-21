@@ -26,7 +26,6 @@ import "./preview.js";
 import "./categories.js";
 import "./pause.js";
 import "./resume.js";
-import "./follow.js";
 import "./log-export.js"; // hidden: operator log export
 import "./match-preview.js"; // hidden: operator subscription match count
 import "./digest-preview.js"; // hidden: operator pending digest preview
@@ -98,7 +97,6 @@ export {
 } from "./categories.js";
 export { resumeCommand, resumeMessage } from "./resume.js";
 export { lastEventMessage, statusCommand, statusMessage } from "./status.js";
-export { followCommand, followingCommand, unfollowCommand, parseMarketArgument } from "./follow.js";
 export { logExportCommand } from "./log-export.js";
 export {
   matchPreviewCommand,

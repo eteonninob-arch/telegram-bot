@@ -65,13 +65,18 @@ export {
   type CommandModule,
 } from "./registry.js";
 export {
+  MAX_COMMAND_ARGUMENT_BYTES,
   TELEGRAM_OPTIONS,
   chatAllowed,
+  checkCommandArgumentLength,
   commandArgument,
+  commandArgumentAllowed,
+  commandArgumentTooLongMessage,
   isChatAllowed,
   isOperator,
   operatorAllowed,
   replyMarkdown,
+  type CommandArgumentCheck,
 } from "./runtime.js";
 export {
   CALLBACK_PAUSE_CANCEL,

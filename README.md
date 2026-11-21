@@ -150,6 +150,11 @@ is operator-only. Repeated `/pause` or `/resume` commands
 are idempotent. Control state is process-local: a restart resumes polling and
 loads the existing version-1 cursor file.
 
+Slash-command arguments are bounded to 256 UTF-8 bytes (`MAX_COMMAND_ARGUMENT_BYTES`)
+by a shared gate before individual command handlers run. Oversized arguments are
+rejected with a fixed, bounded reply and a warning log that records only the command
+name, update id, and byte count (never the user's input).
+
 ## Machine-readable status snapshot
 
 `/status` is for a human in the chat. For a supervisor, a dashboard, or a shell

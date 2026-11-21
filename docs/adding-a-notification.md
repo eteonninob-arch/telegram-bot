@@ -260,6 +260,8 @@ Open `src/notifications/format.ts` and wire the new payload into both `headline`
 
    When a digest period is affected by an RPC gap or restart, pass `completeness: { complete: false, reasons: ["rpc_gap" | "restart"] }` (or build the period with `buildDigestPeriod(events, completeness)` and forward `ScheduledRunContext.completeness` from `createScheduler` in `src/notifications/schedule.ts`) to `formatDigest(events, { grouped, completeness })`. Incomplete periods are explicitly labeled and report observed counts as partial so a partial count is never presented as a complete ledger summary.
 
+   For operator-only previews of the current pending digest window without consuming events, use `previewPendingDigest(window, options)` in `src/notifications/digest-preview.ts` or the hidden operator command `/digestpreview [grouped|flat]` (`src/commands/digest-preview.ts`), which delegates directly to `formatDigest` via `PendingDigestWindow.peek()`.
+
 ---
 
 ### Step 5: Filters and Feature Flags (`src/notifications/format.ts` & `src/notifications/featureFlags.ts`)

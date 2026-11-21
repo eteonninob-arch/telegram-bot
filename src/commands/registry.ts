@@ -24,6 +24,7 @@ import type { LogCapture } from "../logger.js";
 import type { PollerPauseResult, PollerResumeResult, PollerStatus } from "../poller.js";
 import type { BroadcastStore } from "./broadcast.js";
 import type { FollowStore } from "../subscriptions/store.js";
+import type { PendingDigestWindow } from "../notifications/digest-preview.js";
 
 /** Everything a command handler may need, supplied once by `createBot`. */
 export interface CommandDeps {
@@ -53,6 +54,12 @@ export interface CommandDeps {
    * zero matches.
    */
   follows?: FollowStore | undefined;
+  /**
+   * Optional read-only view of the current pending digest window backing
+   * `/digestpreview`. Absent means `/digestpreview` reports that no pending
+   * digest window is configured.
+   */
+  digestWindow?: PendingDigestWindow | undefined;
 }
 
 /** A slash command handler: grammy's command context plus the bot's deps. */

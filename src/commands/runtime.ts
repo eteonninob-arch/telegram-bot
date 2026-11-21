@@ -112,6 +112,27 @@ export async function safeAnswerCallback(
 }
 
 /**
+ * Maximum UTF-8 byte length accepted for slash-command arguments before
+ * individual command handlers run.
+ */
+export const MAX_COMMAND_ARGUMENT_BYTES = 256;
+
+/**
+ * Bounded MarkdownV2 reply sent when a slash-command argument exceeds
+ * {@link MAX_COMMAND_ARGUMENT_BYTES}. Never echoes user input.
+ */
+export function commandArgumentTooLongMessage(
+  maxBytes: number = MAX_COMMAND_ARGUMENT_BYTES,
+): string {
+  return `Command argument is too long \\(maximum ${maxBytes} bytes\\)\\.`;
+}
+
+/** Result of checking a slash-command argument against the shared byte bound. */
+export type CommandArgumentCheck =
+  | { ok: true; argument: string; bytes: number }
+  | { ok: false; bytes: number; maxBytes: number };
+
+/**
  * Argument text following the command, without the command or its leading
  * space. grammy's `ctx.match` is used when present; hand-built contexts in
  * tests often omit it, so the message text is the fallback.
@@ -123,4 +144,42 @@ export function commandArgument(ctx: CommandContext<Context>): string {
   const text = ctx.message?.text ?? "";
   const spaceIndex = text.indexOf(" ");
   return spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
+}
+
+/**
+ * Check whether the slash-command argument in `ctx` fits within `maxBytes`
+ * UTF-8 bytes.
+ */
+export function checkCommandArgumentLength(
+  ctx: CommandContext<Context>,
+  maxBytes: number = MAX_COMMAND_ARGUMENT_BYTES,
+): CommandArgumentCheck {
+  const argument = commandArgument(ctx);
+  const bytes = Buffer.byteLength(argument, "utf8");
+  if (bytes > maxBytes) {
+    return { ok: false, bytes, maxBytes };
+  }
+  return { ok: true, argument, bytes };
+}
+
+/**
+ * Shared gate applied before individual slash-command handlers run.
+ *
+ * When the argument exceeds `maxBytes` UTF-8 bytes, logs a bounded warning
+ * containing only the command name, update id, and byte count (never user
+ * input), replies with a fixed bounded error message, and returns `false`.
+ */
+export async function commandArgumentAllowed(
+  ctx: CommandContext<Context>,
+  command: string,
+  maxBytes: number = MAX_COMMAND_ARGUMENT_BYTES,
+): Promise<boolean> {
+  const check = checkCommandArgumentLength(ctx, maxBytes);
+  if (check.ok) return true;
+  console.warn(
+    `[bot] rejected /${command} on update ${ctx.update?.update_id ?? "unknown"}: ` +
+      `argument exceeds ${check.maxBytes} bytes (${check.bytes} bytes)`,
+  );
+  await ctx.reply(commandArgumentTooLongMessage(check.maxBytes), TELEGRAM_OPTIONS);
+  return false;
 }

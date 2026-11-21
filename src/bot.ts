@@ -26,6 +26,7 @@ import {
   CALLBACK_PAUSE_CANCEL,
   CALLBACK_PAUSE_CONFIRM,
   chatAllowed,
+  commandArgumentAllowed,
   commandMetadata,
   isOperator,
   operatorAllowed,
@@ -64,7 +65,15 @@ export {
   pauseConfirmKeyboard,
   statusKeyboard,
 } from "./commands/keyboards.js";
-export { TELEGRAM_OPTIONS, isChatAllowed, isOperator } from "./commands/runtime.js";
+export {
+  MAX_COMMAND_ARGUMENT_BYTES,
+  TELEGRAM_OPTIONS,
+  checkCommandArgumentLength,
+  commandArgumentTooLongMessage,
+  isChatAllowed,
+  isOperator,
+  type CommandArgumentCheck,
+} from "./commands/runtime.js";
 export {
   aboutMessage,
   categoriesMessage,
@@ -270,22 +279,27 @@ export function registerCommandHandlers(bot: Bot | CommandRegistrar, deps: BotDe
 }
 
 /**
- * Run one command module: apply the authorization its metadata declares, then
- * the handler. Gating here — instead of inside each handler — means a new
- * operator-only or allowlisted command cannot forget its check.
+ * Run one command module: apply the authorization its metadata declares and
+ * the shared argument byte bound, then the handler. Gating here — instead of
+ * inside each handler — means a new operator-only or allowlisted command
+ * cannot forget its check, and oversized arguments are rejected before any
+ * handler runs.
  */
-function dispatch(
+async function dispatch(
   module: CommandModule,
   ctx: CommandContext<Context>,
   deps: BotDeps,
 ): Promise<void> {
   if (module.operatorOnly === true && !operatorAllowed(ctx, deps.config, module.command)) {
-    return Promise.resolve();
+    return;
   }
   if (module.chatAllowlist === true && !chatAllowed(ctx, deps.config, module.command)) {
-    return Promise.resolve();
+    return;
   }
-  return module.handler(ctx, deps);
+  if (!(await commandArgumentAllowed(ctx, module.command))) {
+    return;
+  }
+  await module.handler(ctx, deps);
 }
 
 /**

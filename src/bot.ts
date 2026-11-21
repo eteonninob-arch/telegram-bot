@@ -98,12 +98,19 @@ export {
 } from "./callbacks.js";
 export {
   handleBroadcastCallback,
+  handleConfirmationsCallback,
+  handleConfirmationsCommand,
   registerBroadcastHandlers,
   handleBroadcastCommand,
   getConfiguredBroadcastChats,
   fingerprintDestinationSet,
+  formatPendingConfirmations,
+  pendingConfirmationsKeyboard,
+  MAX_PENDING_CONFIRMATIONS,
+  BROADCAST_NO_PENDING_MESSAGE,
   BroadcastStore,
   sendBroadcast,
+  type PendingConfirmationSummary,
 } from "./commands/broadcast.js";
 export { clearHintState } from "./commands/unknown.js";
 

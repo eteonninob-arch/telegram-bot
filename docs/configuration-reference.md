@@ -47,6 +47,12 @@ Routing previews report which Telegram destinations an event would be delivered 
 
 Previews are read-only: they perform no Telegram API calls, do not advance the cursor, and do not write to `CURSOR_FILE`. A preview does not guarantee delivery; the live path remains the authority for what is actually sent.
 
+### Operator Digest Preview
+Operators can inspect the current pending digest window via `/digestpreview [grouped|flat]` (backed by `previewPendingDigest` in `src/notifications/digest-preview.ts` and the optional `digestWindow` dependency on `CommandDeps`).
+- **Live builder, non-consuming**: renders pending events through `formatDigest` without draining or mutating the pending window (for example, `DeferredQueue.peek()`), so subsequent scheduled flushes still receive all pending events.
+- **Operator authorization**: protected by the existing `OPERATOR_TELEGRAM_USER_ID` gate (`operatorOnly: true`, `hidden: true`). Non-operators and deployments without `OPERATOR_TELEGRAM_USER_ID` are silently ignored without reading the pending window.
+- **Completeness & schedule**: preserves period completeness metadata (`rpc_gap`, `restart`) and displays the next scheduled digest timestamp when provided.
+
 ### Health Reporting
 - `HEALTH_HOST` & `HEALTH_PORT`: Binds a local HTTP endpoint for health probes (e.g., Kubernetes liveness probes). Set port to 0 to disable.
 - `HEALTH_STALE_MS`: Marks the health endpoint as degraded if no successful poll completes within this window (e.g., 90000ms).
@@ -65,6 +71,7 @@ Previews are read-only: they perform no Telegram API calls, do not advance the c
 
 ### Broadcast Confirmations
 - **Behavior**: `/broadcast` confirmations are bound to the issuing operator, the chat in which they were issued, and the action (confirm or cancel). Each identity is consumed on first use.
+- **Pending List & Explicit Cancellation**: Operators in private chat can inspect their active pending confirmations with `/broadcast list` (or `/confirmations`) and explicitly cancel an action by ID (`/broadcast cancel <id>`, `/confirmations cancel <id>`, `/confirmations cancel all`, or via the inline cancel button). The pending confirmation store and listing are bounded to `MAX_PENDING_CONFIRMATIONS` (20 entries, oldest evicted at capacity). Listings show only the current operator's unexpired actions with remaining time and expiry timestamp, and report only destination counts so target chat IDs or other operators' actions are never exposed.
 - **Restarts**: When `BROADCAST_CONFIRMATION_STORE_PATH` is set, identities survive restarts. Replayed or expired confirmations are rejected after a restart. Without it, pending confirmations are lost on restart and are rejected as unknown.
 
 ### Cursor Management and Restarts

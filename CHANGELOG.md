@@ -6,6 +6,14 @@ All notable changes to this project are documented here.
 
 ### Added
 
+**Compaction aggregate reconciliation** (#911)
+
+- `reconcileCompaction(before, after, options?)` in `src/stellar/compaction-reconciliation.ts`
+  compares volume and latency aggregates before and after archive compaction and
+  reports range loss separately from arithmetic mismatch;
+  `renderReconciliationReport()` renders the deterministic text report. See
+  `docs/analytics-export.md`.
+
 **Filter explanation tree**
 
 - `explainFilterRule(rule, event, options?)` in `src/notifications/filter-expr.ts`

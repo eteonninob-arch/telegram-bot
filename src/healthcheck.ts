@@ -75,6 +75,9 @@ function main() {
       path: "/health",
       method: "GET",
       timeout: 2000,
+      headers: {
+        Connection: "close",
+      },
     },
     (res) => {
       let body = "";

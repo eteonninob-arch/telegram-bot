@@ -150,6 +150,11 @@ is operator-only. Repeated `/pause` or `/resume` commands
 are idempotent. Control state is process-local: a restart resumes polling and
 loads the existing version-1 cursor file.
 
+Slash-command arguments are bounded to 256 UTF-8 bytes (`MAX_COMMAND_ARGUMENT_BYTES`)
+by a shared gate before individual command handlers run. Oversized arguments are
+rejected with a fixed, bounded reply and a warning log that records only the command
+name, update id, and byte count (never the user's input).
+
 ## Machine-readable status snapshot
 
 `/status` is for a human in the chat. For a supervisor, a dashboard, or a shell
@@ -669,9 +674,11 @@ The decoder is deliberately forward-compatible at the event boundary:
 - Events that are valid on-chain but unknown to this version are retained as
   `unknown` for bounded logs and are skipped for Telegram. They are not
   invented, retried, or treated as current contract state.
-- Amounts remain `bigint` atomic USDC values until formatting; no floating-point
-  conversion is used. Contract strings are clipped at the notification and
-  diagnostic boundaries, and scanner output is bounded.
+- Amounts remain `bigint` atomic USDC values until formatting; large integers
+  are represented as decimal strings or `bigint`, and lossy floating-point or
+  unsafe number conversions in IDs, amounts, and generic event decoding are
+  rejected. Contract strings are clipped at the notification and diagnostic
+  boundaries, and scanner output is bounded.
 
 The compatibility promise is for the deployed event wire shape and the public
 decoded payload names above, not for arbitrary XDR or future contract fields.

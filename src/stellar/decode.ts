@@ -18,11 +18,13 @@
  * looks up the appropriate decoder function while safely falling back to v1 or
  * unknown payloads if an unrecognised version or event shape is encountered.
  *
- * ── Amounts ──────────────────────────────────────────────────────────────────
+ * ── Amounts & Numeric Safety ─────────────────────────────────────────────────
  *
  * All money is atomic USDC in `i128`. Stellar's USDC Stellar Asset Contract has
  * **7 decimals**, not the 6 of the ERC-20. Amounts stay `bigint` through
  * decoding and are only converted for display, at the formatting edge.
+ * Large integers are represented as decimal strings or `bigint`; lossy number
+ * coercion in IDs, amounts, and ordering positions is strictly rejected.
  */
 
 import { recordDecodeOutcome } from "./decode-stats.js";
@@ -32,6 +34,7 @@ import { eventKey } from "../dedup.js";
 import { txExplorerUrl } from "./client.js";
 import { redactText } from "../redact.js";
 import { peekEventName } from "./peek.js";
+import { findDuplicateMapKey } from "./generic-decode.js";
 
 export { peekEventName };
 
@@ -359,6 +362,9 @@ export const MAX_DECODED_EVENT_XDR_BYTES = 16_384;
 /** Per-topic XDR budget — event names, ids and addresses are all tiny. */
 export const MAX_EVENT_TOPIC_XDR_BYTES = 1_024;
 
+/** Maximum number of topics allowed on a single Soroban event (protocol max is 4). */
+export const MAX_EVENT_TOPICS = 4;
+
 /** Hard ceiling on any single decoded string field after native conversion. */
 export const MAX_DECODED_STRING_CHARS = 2_048;
 
@@ -414,6 +420,10 @@ function native(value: xdr.ScVal): unknown {
   if (v === null || typeof v !== "object" || typeof v.type !== "string") {
     throw new DecodeError(`expected an ScVal, got ${v === null ? "null" : typeof v}`);
   }
+  const collision = findDuplicateMapKey(value);
+  if (collision) {
+    throw new DecodeError(collision.reason);
+  }
   return scValToNative(value);
 }
 
@@ -424,8 +434,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function big(value: unknown, what: string): bigint {
   if (typeof value === "bigint") return value;
-  if (typeof value === "number" && Number.isInteger(value)) return BigInt(value);
-  if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) {
+      throw new DecodeError(`${what}: expected safe integer number, got ${value}`);
+    }
+    return BigInt(value);
+  }
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
+    return BigInt(value.trim());
+  }
   throw new DecodeError(`${what}: expected an integer, got ${typeof value}`);
 }
 
@@ -1151,6 +1168,35 @@ export function decodeEvent(
       };
     }
 
+    // Validate topic count before accessing variant positions or parsing payload.
+    if (event.topic.length > MAX_EVENT_TOPICS) {
+      recordDecodeOutcome(source, eventName, "malformed");
+      return {
+        ...meta,
+        payload: {
+          name: "unknown",
+          eventName,
+          reason: `${eventName}: topic count ${event.topic.length} exceeds maximum of ${MAX_EVENT_TOPICS}`,
+        },
+      };
+    }
+
+    const schemas = source === "market" ? MARKET_TOPIC_SCHEMAS : SQUAD_TOPIC_SCHEMAS;
+    const schema = Object.prototype.hasOwnProperty.call(schemas, eventName)
+      ? schemas[eventName]
+      : undefined;
+    if (schema && event.topic.length !== schema.expectedCount) {
+      recordDecodeOutcome(source, eventName, "malformed");
+      return {
+        ...meta,
+        payload: {
+          name: "unknown",
+          eventName,
+          reason: `${eventName}: expected ${schema.expectedCount} topics, got ${event.topic.length}`,
+        },
+      };
+    }
+
     // If caller provided shouldDecode, and it returned false, and the event is neither admin nor unknown:
     // skip full value XDR decoding and return a minimal decoded event.
     if (opts?.shouldDecode && !opts.shouldDecode(eventName)) {
@@ -1170,6 +1216,19 @@ export function decodeEvent(
         return null;
       }
     });
+
+    const topicCheck = validateTopicSchema(source, eventName, topics);
+    if (!topicCheck.valid) {
+      recordDecodeOutcome(source, eventName, "malformed");
+      return {
+        ...meta,
+        payload: {
+          name: "unknown",
+          eventName,
+          reason: topicCheck.reason,
+        },
+      };
+    }
 
     // Fail closed before native conversion allocates: an oversized value must
     // not turn one hostile event into a multi-megabyte payload. This runs after
@@ -1226,30 +1285,44 @@ export function decodeEvent(
 
 // ── Ordering metadata (issue #48) ────────────────────────────────────────────
 
-/** Ledger sequence: a finite non-negative integer, else 0. Never `NaN`. */
+/** Ledger sequence: a safe non-negative integer, else 0. Never `NaN` or lossy float. */
 function toLedger(value: unknown): number {
-  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
-  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
-  const floored = Math.floor(n);
-  return floored >= 0 ? floored : 0;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) return 0;
+    return value;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    try {
+      const bn = BigInt(value.trim());
+      if (bn < 0n || bn > BigInt(Number.MAX_SAFE_INTEGER)) return 0;
+      return Number(bn);
+    } catch {
+      return 0;
+    }
+  }
+  return 0;
 }
 
 /**
- * Transaction/operation position: a non-negative integer when the RPC provides
- * one (number or numeric string), else `null`. `null` means "the chain did not
+ * Transaction/operation position: a non-negative safe integer when the RPC provides
+ * one (safe number or decimal string), else `null`. `null` means "the chain did not
  * say" — sorting orders it after known positions instead of inventing one.
  */
 function toPosition(value: unknown): number | null {
-  let n: number;
   if (typeof value === "number") {
-    n = value;
-  } else if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
-    n = Number(value.trim());
-  } else {
-    return null;
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    return value;
   }
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return null;
-  return n;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    try {
+      const bn = BigInt(value.trim());
+      if (bn < 0n || bn > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+      return Number(bn);
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 /** Trimmed transaction hash, or `""` when absent. Kept verbatim, not dropped. */
